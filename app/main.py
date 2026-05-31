@@ -34,12 +34,12 @@ app.include_router(resume_router.router, prefix="/api", tags=["resume"])
 @app.get("/")
 async def root():
     return {
-        "app_name": "HireDesk AI - Role Suggestion and HR Intelligence Platform",
-        "message": "AI-Powered Resume Analysis & Job Role Recommendation Service",
+        "app_name": "HireDesk AI - HR Intelligence Platform",
+        "message": "AI-powered resume analysis and interview question generation for HR professionals.",
         "status": "running",
         "version": "3.1.0",
         "description": (
-            "HireDesk AI is a comprehensive HR intelligence platform that leverages Google Gemini AI "
+            "HireDesk AI is a comprehensive HR intelligence platform"
             "to provide advanced resume analysis, job role recommendations, and interview question generation. "
             "Perfect for HR professionals, recruiters, and hiring managers looking to streamline their recruitment process."
         ),

@@ -1,5 +1,5 @@
 [project]
-name = "jobpsych-ai"
+name = "hiredesk-ai"
 version = "3.1.0"
 description = "HireDesk AI"
 readme = "README.md"
