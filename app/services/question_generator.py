@@ -4,11 +4,15 @@ from app.services.prompts.base_prompt_service import BasePromptService
 import os
 
 try:
-    import google.generativeai as genai
+    import google.genai as genai
     GENAI_AVAILABLE = True
-except ImportError:
-    genai = None
-    GENAI_AVAILABLE = False
+except Exception:
+    try:
+        import google.generativeai as genai
+        GENAI_AVAILABLE = True
+    except Exception:
+        genai = None
+        GENAI_AVAILABLE = False
 
 
 class QuestionGenerator(BasePromptService):
@@ -26,7 +30,8 @@ class QuestionGenerator(BasePromptService):
             raise ValueError("GOOGLE_API_KEY environment variable is required")
         if not GENAI_AVAILABLE or not genai:
             raise ImportError("google-generativeai package is not available")
-        genai.configure(api_key=self.api_key)
+        from app.services.genai_compat import configure_genai
+        configure_genai(self.api_key)
 
     @property
     def model(self):
@@ -35,15 +40,14 @@ class QuestionGenerator(BasePromptService):
             if not GENAI_AVAILABLE or not genai:
                 raise ImportError("google-generativeai package is not available")
             try:
-                json_config = genai.types.GenerationConfig(
-                    response_mime_type="application/json"
-                )
-                self._model = genai.GenerativeModel(
-                    self.DEFAULT_MODEL,
-                    generation_config=json_config
-                )
-            except Exception:
-                self._model = genai.GenerativeModel(self.DEFAULT_MODEL)
+                try:
+                    json_config = genai.types.GenerationConfig(
+                        response_mime_type="application/json"
+                    )
+                except Exception:
+                    json_config = None
+                from app.services.genai_compat import get_model
+                self._model = get_model(self.DEFAULT_MODEL, generation_config=json_config)
         return self._model
 
     async def generate(self, resume_data: Dict[str, Any], **kwargs) -> List[Question]:

@@ -31,6 +31,29 @@ app.add_middleware(
 app.include_router(resume_router.router, prefix="/api", tags=["resume"])
 
 
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from fastapi import Request
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    # Inspect validation errors and provide clearer guidance for file uploads
+    errors = exc.errors()
+    for err in errors:
+        loc = err.get("loc", [])
+        msg = err.get("msg", "")
+        if isinstance(loc, (list, tuple)) and len(loc) >= 2 and loc[0] == "body" and loc[1] == "file":
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "detail": "Invalid file upload. Ensure you send the file as multipart/form-data using the 'file' field (e.g. curl -F \"file=@resume.pdf\"). Do not send raw binary or JSON for the file field."
+                }
+            )
+    # Fallback to standard FastAPI validation response
+    return JSONResponse(status_code=422, content={"detail": errors})
+
+
 @app.get("/")
 async def root():
     return {

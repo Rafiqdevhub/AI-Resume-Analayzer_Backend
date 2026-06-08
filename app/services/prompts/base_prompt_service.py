@@ -1,7 +1,13 @@
 import json
 from typing import Dict, List, Any
 from abc import ABC, abstractmethod
-import google.generativeai as genai
+try:
+    import google.genai as genai
+except Exception:
+    try:
+        import google.generativeai as genai
+    except Exception:
+        genai = None
 
 class BasePromptService(ABC):
     """
@@ -10,8 +16,7 @@ class BasePromptService(ABC):
     Uses JSON mode for guaranteed valid JSON output from AI model.
     """
 
-    DEFAULT_MODEL = "gemini-2.5-flash"
-    ADVANCED_MODEL = "gemini-2.5-pro"
+    DEFAULT_MODEL = "gemini-3.5-flash"
 
     MATCH_RUBRIC = (
         "MATCH RUBRIC:\n"
@@ -41,18 +46,21 @@ class BasePromptService(ABC):
             try:
                 if not genai:
                     raise ImportError("google-generativeai package is not available")
-                # Enable JSON mode for guaranteed valid JSON output
+                # Enable JSON mode for guaranteed valid JSON output when supported
                 try:
-                    json_config = genai.types.GenerationConfig(  # type: ignore[attr-defined]
-                        response_mime_type="application/json"
-                    )
-                    self._model = genai.GenerativeModel(  # type: ignore[attr-defined]
-                        self.DEFAULT_MODEL,
-                        generation_config=json_config
-                    )
+                    config_cls = getattr(genai.types, "GenerateContentConfig", None) or getattr(genai.types, "GenerationConfig", None)
+                    if config_cls is not None:
+                        json_config = config_cls(response_mime_type="application/json")
+                    else:
+                        json_config = None
                 except Exception:
-                    # Fallback if JSON mode not available in this version
-                    self._model = genai.GenerativeModel(self.DEFAULT_MODEL)  # type: ignore[attr-defined]
+                    json_config = None
+
+                from app.services.genai_compat import get_model
+                try:
+                    self._model = get_model(self.DEFAULT_MODEL, generation_config=json_config)
+                except Exception as e:
+                    raise RuntimeError(f"Failed to construct compatible AI model: {str(e)}")
             except ImportError as e:
                 raise ImportError(f"Failed to initialize AI model: {str(e)}")
         return self._model

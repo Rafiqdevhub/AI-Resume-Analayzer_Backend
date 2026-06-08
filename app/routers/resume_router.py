@@ -1,6 +1,10 @@
+import base64
+from io import BytesIO
+
 from fastapi import APIRouter, UploadFile, HTTPException, Request, Form, File, Depends, status
+from starlette.datastructures import UploadFile as StarletteUploadFile
 from pydantic import ValidationError
-from typing import Optional, List
+from typing import Optional, List, Union
 import logging
 from app.services.resume_parser import ResumeParser
 from app.services.advanced_analyzer import AdvancedAnalyzer
@@ -19,6 +23,123 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+
+class InMemoryUploadFile:
+    def __init__(self, filename: str, content: bytes, content_type: str = "application/octet-stream"):
+        self.filename = filename
+        self.content_type = content_type
+        self._file = BytesIO(content)
+
+    async def read(self):
+        return self._file.read()
+
+    async def seek(self, offset: int, whence: int = 0):
+        return self._file.seek(offset, whence)
+
+    async def close(self):
+        return None
+
+
+def _decode_file_string(file_value: str) -> bytes:
+    try:
+        return base64.b64decode(file_value, validate=True)
+    except Exception:
+        return file_value.encode("latin-1")
+
+
+def _guess_filename(content: bytes) -> str:
+    if content.startswith(b"%PDF"):
+        return "resume.pdf"
+    if content.startswith(b"PK"):
+        return "resume.docx"
+    if content.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
+        return "resume.doc"
+    return "resume.bin"
+
+
+def _infer_filename_from_content(content: bytes, content_type: Optional[str] = None) -> Optional[str]:
+    if content.startswith(b"%PDF"):
+        return "resume.pdf"
+    if content.startswith(b"PK"):
+        return "resume.docx"
+    if content.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
+        return "resume.doc"
+    if content_type:
+        type_lower = content_type.lower()
+        if "pdf" in type_lower:
+            return "resume.pdf"
+        if "word" in type_lower or "doc" in type_lower:
+            return "resume.docx"
+    return None
+
+
+async def _resolve_file_upload(request: Request, file: Optional[UploadFile]) -> Optional[UploadFile]:
+    if file is not None:
+        return file
+
+    # Fallback for form fields where file content was submitted as a string or alternate field name.
+    content_type = request.headers.get("content-type", "").lower()
+    if "multipart/form-data" in content_type:
+        try:
+            form = await request.form()
+        except Exception:
+            form = None
+        if form:
+            if "file" in form:
+                form_file = form.get("file")
+                if isinstance(form_file, (UploadFile, StarletteUploadFile)):
+                    return form_file
+                if isinstance(form_file, str):
+                    bytes_data = _decode_file_string(form_file)
+                    filename = _guess_filename(bytes_data)
+                    return InMemoryUploadFile(filename=filename, content=bytes_data)
+
+            for key, form_value in form.items():
+                if isinstance(form_value, (UploadFile, StarletteUploadFile)):
+                    return form_value
+                if isinstance(form_value, str) and key.lower() in {"resume", "document", "upload", "file_content", "data"}:
+                    bytes_data = _decode_file_string(form_value)
+                    filename = _guess_filename(bytes_data)
+                    return InMemoryUploadFile(filename=filename, content=bytes_data)
+
+    # Fallback for JSON/other non-multipart payloads.
+    body = None
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+
+    if isinstance(body, dict):
+        raw_file = None
+        for key in ("file", "resume", "resume_file", "document", "data", "file_data"):
+            if body.get(key) is not None:
+                raw_file = body.get(key)
+                break
+
+        if raw_file is not None:
+            if isinstance(raw_file, str):
+                bytes_data = _decode_file_string(raw_file)
+            elif isinstance(raw_file, (bytes, bytearray)):
+                bytes_data = bytes(raw_file)
+            else:
+                bytes_data = None
+
+            if bytes_data is not None:
+                filename = body.get("filename") or _guess_filename(bytes_data)
+                return InMemoryUploadFile(filename=filename, content=bytes_data)
+
+    # Fallback for raw binary/text body directly sent without JSON.
+    try:
+        raw_body = await request.body()
+    except Exception:
+        raw_body = b""
+
+    if raw_body:
+        return InMemoryUploadFile(filename=_guess_filename(raw_body), content=raw_body)
+
+    return None
+
+
 def format_validation_error(error: ValidationError) -> str:
     error_messages = []
     for err in error.errors():
@@ -32,12 +153,57 @@ def format_validation_error(error: ValidationError) -> str:
 
 @router.post("/hiredesk-analyze", response_model=ResumeAnalysisResponse, status_code=status.HTTP_200_OK)
 async def hiredesk_analyze(
-    file: UploadFile,
-    target_role: str = Form(...),
-    job_description: str = Form(...),
+    request: Request,
+    target_role: Optional[str] = Form(None),
+    job_description: Optional[str] = Form(None),
     current_user: TokenData = Depends(get_current_user)
 ):
     try:
+        # Parse incoming file from raw request rather than relying on FastAPI body validation.
+        file = await _resolve_file_upload(request, None)
+        logger.debug("hiredesk_analyze: resolved file type=%s filename=%s content_type=%s",
+                     type(file), getattr(file, "filename", None), getattr(file, "content_type", None))
+
+        # Also support JSON payloads that include target_role/job_description.
+        if (not target_role or not job_description) and request.headers.get("content-type", "").startswith("application/json"):
+            try:
+                body = await request.json()
+            except Exception:
+                body = None
+            if isinstance(body, dict):
+                target_role = target_role or body.get("target_role")
+                job_description = job_description or body.get("job_description")
+
+        if file is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "success": False,
+                    "message": "Missing resume file. Ensure you send the file as multipart/form-data using the 'file' or 'resume' field, or provide a JSON body with a base64/raw file value.",
+                    "error": "VALIDATION_ERROR"
+                }
+            )
+
+        if not target_role:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "success": False,
+                    "message": "Missing target_role. Provide a target_role string in multipart form or JSON body.",
+                    "error": "VALIDATION_ERROR"
+                }
+            )
+
+        if not job_description:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "success": False,
+                    "message": "Missing job_description. Provide a job_description string in multipart form or JSON body.",
+                    "error": "VALIDATION_ERROR"
+                }
+            )
+
         # Check rate limit before processing
         rate_limit_status = await rate_limit_service.check_user_upload_limit(current_user.email)
 
@@ -54,26 +220,6 @@ async def hiredesk_analyze(
                 }
             )
 
-        if not file.filename:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail={
-                    "success": False,
-                    "message": "No file provided.",
-                    "error": "VALIDATION_ERROR"
-                }
-            )
-
-        if not file.filename.lower().endswith(('.pdf', '.doc', '.docx')):
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail={
-                    "success": False,
-                    "message": "Invalid file format. Please upload PDF, DOC, or DOCX files only.",
-                    "error": "VALIDATION_ERROR"
-                }
-            )
-
         file_content = await file.read()
         if len(file_content) > 10 * 1024 * 1024:  # 10MB
             raise HTTPException(
@@ -84,6 +230,25 @@ async def hiredesk_analyze(
                     "error": "VALIDATION_ERROR"
                 }
             )
+
+        resolved_filename = getattr(file, "filename", "") or ""
+        if not resolved_filename.lower().endswith(('.pdf', '.doc', '.docx')):
+            inferred_name = _infer_filename_from_content(file_content, getattr(file, "content_type", ""))
+            if inferred_name:
+                resolved_filename = inferred_name
+                try:
+                    setattr(file, "filename", inferred_name)
+                except Exception:
+                    pass
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail={
+                        "success": False,
+                        "message": "Invalid file format. Please upload PDF, DOC, or DOCX files only.",
+                        "error": "VALIDATION_ERROR"
+                    }
+                )
 
         # Reset file pointer for processing
         await file.seek(0)
@@ -182,19 +347,22 @@ async def hiredesk_analyze(
             }
         )
     except Exception as e:
+        # Preserve the original exception message for clearer diagnostics while
+        # mapping obvious file-read issues to user-friendly messages.
         error_message = str(e)
         if "PDF" in error_message:
-            error_message = "Error reading PDF file. Please ensure it's not corrupted or password protected."
+            user_message = "Error reading PDF file. Please ensure it's not corrupted or password protected."
         elif "DOCX" in error_message:
-            error_message = "Error reading DOCX file. Please ensure it's a valid Word document."
+            user_message = "Error reading DOCX file. Please ensure it's a valid Word document."
         else:
-            error_message = "Analysis failed. Please try again."
-        
+            # Propagate original message to aid debugging instead of masking it.
+            user_message = error_message or "Analysis failed. Please try again."
+
         raise HTTPException(
-            status_code=500, 
+            status_code=500,
             detail={
                 "success": False,
-                "message": error_message,
+                "message": user_message,
                 "error": "SERVER_ERROR"
             }
         )
@@ -298,9 +466,11 @@ async def batch_analyze_resumes(
         results = []
         successful_files = []
         failed_files = []
-        batch_service = BatchAnalyzeService()
 
         for file in files:
+            batch_service = BatchAnalyzeService()
+            logger.debug("batch_analyze: processing file type=%s filename=%s content_type=%s",
+                         type(file), getattr(file, "filename", None), getattr(file, "content_type", None))
             try:
                 if not file.filename:
                     raise ValueError("No filename provided")
@@ -371,7 +541,8 @@ async def batch_analyze_resumes(
                 elif "DOCX" in error_message:
                     display_error = "Error reading DOCX file. Please ensure it's a valid document."
                 else:
-                    display_error = detailed_error if "Failed to" in detailed_error else "Analysis failed. Please try again."
+                    # Prefer the detailed error from the exception for debugging
+                    display_error = detailed_error or "Analysis failed. Please try again."
 
                 results.append({
                     "file_name": file.filename,
@@ -546,6 +717,8 @@ async def compare_resumes(
         compare_service = CompareResumesService()
 
         for file in files:
+            logger.debug("compare_resumes: processing file type=%s filename=%s content_type=%s",
+                         type(file), getattr(file, "filename", None), getattr(file, "content_type", None))
             try:
                 # Validate file
                 if not file.filename:
@@ -591,16 +764,16 @@ async def compare_resumes(
             except Exception as e:
                 error_message = str(e)
                 if "PDF" in error_message:
-                    error_message = "Error reading PDF file. Please ensure it's not corrupted."
+                    user_message = "Error reading PDF file. Please ensure it's not corrupted."
                 elif "DOCX" in error_message:
-                    error_message = "Error reading DOCX file. Please ensure it's a valid document."
+                    user_message = "Error reading DOCX file. Please ensure it's a valid document."
                 else:
-                    error_message = "Analysis failed. Please try again."
+                    user_message = error_message or "Analysis failed. Please try again."
 
-                failed_files.append((file.filename, error_message))
+                failed_files.append((file.filename, user_message))
                 candidates.append({
                     "filename": file.filename,
-                    "error": error_message,
+                    "error": user_message,
                     "score": 0,
                     "status": "error"
                 })

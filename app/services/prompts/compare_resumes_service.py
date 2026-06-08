@@ -4,11 +4,15 @@ from app.models.schemas import RoleRecommendation
 from app.services.prompts.base_prompt_service import BasePromptService
 
 try:
-    import google.generativeai as genai
+    import google.genai as genai
     GENAI_AVAILABLE = True
-except ImportError:
-    genai = None
-    GENAI_AVAILABLE = False
+except Exception:
+    try:
+        import google.generativeai as genai
+        GENAI_AVAILABLE = True
+    except Exception:
+        genai = None
+        GENAI_AVAILABLE = False
 
 
 class CompareResumesService(BasePromptService):
@@ -31,7 +35,8 @@ class CompareResumesService(BasePromptService):
             raise ValueError("GOOGLE_API_KEY environment variable is required")
         if not GENAI_AVAILABLE or not genai:
             raise ImportError("google-generativeai package is not available")
-        genai.configure(api_key=self.api_key)  # type: ignore[attr-defined]
+        from app.services.genai_compat import configure_genai
+        configure_genai(self.api_key)
         self._model = None
 
     @property
@@ -42,16 +47,16 @@ class CompareResumesService(BasePromptService):
                 raise ImportError("google-generativeai package is not available")
             # Force JSON output from the model
             try:
-                json_config = genai.types.GenerationConfig(  # type: ignore[attr-defined]
-                    response_mime_type="application/json"
-                )
-                self._model = genai.GenerativeModel(  # type: ignore[attr-defined]
-                    self.DEFAULT_MODEL,
-                    generation_config=json_config
-                )
+                try:
+                    json_config = genai.types.GenerationConfig(  # type: ignore[attr-defined]
+                        response_mime_type="application/json"
+                    )
+                except Exception:
+                    json_config = None
+                from app.services.genai_compat import get_model
+                self._model = get_model(self.DEFAULT_MODEL, generation_config=json_config)
             except Exception:
-                # Fallback if JSON mode is not available
-                self._model = genai.GenerativeModel(self.DEFAULT_MODEL)  # type: ignore[attr-defined]
+                raise
         return self._model
 
     async def generate(self, resume_data: Dict[str, Any], **kwargs) -> List[RoleRecommendation]:

@@ -4,11 +4,15 @@ from app.models.schemas import ResumeScore, PersonalityInsights, CareerPathPredi
 from app.services.prompts.base_prompt_service import BasePromptService
 
 try:
-    import google.generativeai as genai
+    import google.genai as genai
     GENAI_AVAILABLE = True
-except ImportError:
-    genai = None
-    GENAI_AVAILABLE = False
+except Exception:
+    try:
+        import google.generativeai as genai
+        GENAI_AVAILABLE = True
+    except Exception:
+        genai = None
+        GENAI_AVAILABLE = False
 
 class AdvancedAnalyzer(BasePromptService):
     def __init__(self):
@@ -20,7 +24,8 @@ class AdvancedAnalyzer(BasePromptService):
         if not GENAI_AVAILABLE or not genai:
             raise ImportError("google-generativeai package is not available")
 
-        genai.configure(api_key=self.api_key)
+        from app.services.genai_compat import configure_genai
+        configure_genai(self.api_key)
 
     async def generate(self, resume_data: Dict[str, Any], **kwargs) -> Dict[str, Any]:
         """Generate comprehensive analysis including score, personality, and career path."""

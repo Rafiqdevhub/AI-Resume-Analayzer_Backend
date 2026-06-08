@@ -9,11 +9,15 @@ from io import BytesIO
 import os
 
 try:
-    import google.generativeai as genai
+    import google.genai as genai
     GENAI_AVAILABLE = True
-except ImportError:
-    genai = None
-    GENAI_AVAILABLE = False
+except Exception:
+    try:
+        import google.generativeai as genai
+        GENAI_AVAILABLE = True
+    except Exception:
+        genai = None
+        GENAI_AVAILABLE = False
 
 
 class ResumeParser:
@@ -24,8 +28,10 @@ class ResumeParser:
         
         if not GENAI_AVAILABLE or not genai:
             raise ImportError("google-generativeai package is not available")
-            
-        genai.configure(api_key=self.api_key)
+
+        # Use compatibility shim to configure genai across library versions
+        from app.services.genai_compat import configure_genai
+        configure_genai(self.api_key)
         self._model = None
 
     @property
@@ -34,7 +40,8 @@ class ResumeParser:
         if self._model is None:
             if not GENAI_AVAILABLE or not genai:
                 raise ImportError("google-generativeai package is not available")
-            self._model = genai.GenerativeModel('gemini-2.5-flash')
+            from app.services.genai_compat import get_model
+            self._model = get_model('gemini-3.5-flash')
         return self._model
 
     async def parse(self, file: UploadFile) -> Dict[str, Any]:
