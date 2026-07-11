@@ -7,7 +7,7 @@ from typing import Optional
 
 security = HTTPBearer()
 
-JWT_SECRET = os.getenv("JWT_ACCESS_SECRET") or os.getenv("JWT_SECRET")
+JWT_SECRET = os.getenv("JWT_SECRET")
 ALGORITHM = "HS256"
 
 class TokenData:
